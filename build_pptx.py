@@ -33,17 +33,25 @@ def set_title(slide, text, size=32):
         for r in p.runs: r.font.size = Pt(size); r.font.bold = True; r.font.color.rgb = INK
 
 def runs(par, text, size, bold=False, color=None, mono=False):
-    """text with **bold** segments and `code` segments"""
+    """text with **bold** segments, `code` segments, and _{sub} / ^{super} scripts"""
     import re
     for seg in re.split(r"(\*\*.+?\*\*|`.+?`)", text):
         if not seg: continue
-        r = par.add_run()
-        if seg.startswith("**"): r.text = seg[2:-2]; r.font.bold = True
-        elif seg.startswith("`"): r.text = seg[1:-1]; r.font.name = "Consolas"
-        else: r.text = seg; r.font.bold = bold
-        r.font.size = Pt(size)
-        if color is not None: r.font.color.rgb = color
-        if mono: r.font.name = "Consolas"
+        b = bold
+        if seg.startswith("**"): seg = seg[2:-2]; b = True
+        elif seg.startswith("`"):
+            r = par.add_run(); r.text = seg[1:-1]; r.font.name = "Consolas"; r.font.size = Pt(size)
+            if color is not None: r.font.color.rgb = color
+            continue
+        for part in re.split(r"(_\{.+?\}|\^\{.+?\})", seg):
+            if not part: continue
+            r = par.add_run()
+            if part[:2] in ("_{", "^{"):
+                r.text = part[2:-1]; r.font._rPr.set("baseline", "-25000" if part[0] == "_" else "30000")
+            else: r.text = part
+            r.font.bold = b; r.font.size = Pt(size)
+            if color is not None: r.font.color.rgb = color
+            if mono: r.font.name = "Consolas"
 
 def bullets(tf, items, size=18, sub=15, first=True):
     """items: list of str or (str, level)"""
@@ -110,17 +118,50 @@ def two_content(title):
 
 def remove(shape): shape._element.getparent().remove(shape._element)
 
-def eqbox(slide, left, top, width, height, title, lines, size=15):
-    """shaded panel like code(), with equations in the body font"""
-    box = slide.shapes.add_shape(1, left, top, width, height)
+EQ = os.path.join(DATA, "eq")
+_FONT = "/System/Library/Fonts/Supplemental/Arial.ttf"
+
+def text_height(text, size, width_in, indent=0.0):
+    """rough wrapped height (in) of one paragraph; Arial metrics +10% stand in for Aptos"""
+    import re
+    from PIL import ImageFont
+    f = ImageFont.truetype(_FONT, int(size * 10)); plain = re.sub(r"\*\*|`|[_^]\{|\}", "", text)
+    avail = (width_in - indent - 0.25) * 720; lines, cur = 1, 0
+    for w in plain.split():
+        ww = 1.1 * f.getlength(w + " ")
+        if cur + ww > avail: lines += 1; cur = ww
+        else: cur += ww
+    return lines * size * 1.2 / 72
+
+def stack(slide, left, top, width, items, size=15, color=None):
+    """place text paragraphs and LaTeX equation images top to bottom; items: str, ("•", str) or ("eq", name).
+    Returns the bottom edge (EMU)."""
+    y = top
+    for it in items:
+        if isinstance(it, tuple) and it[0] == "eq":
+            path = os.path.join(EQ, it[1] + ".png"); pw, phh = Image.open(path).size
+            w_in, h_in = pw / 600, phh / 600; scale = min(1.0, (width / 914400 - 0.3) / w_in)
+            pic = slide.shapes.add_picture(path, left + Inches(0.15), y + Inches(0.02), Inches(w_in * scale), Inches(h_in * scale))
+            y = pic.top + pic.height + Inches(0.08)
+        else:
+            bullet = isinstance(it, tuple); text = it[1] if bullet else it
+            h = text_height(("•  " if bullet else "") + text, size, width / 914400)
+            tb = slide.shapes.add_textbox(left, y, width, Inches(h)); tf = tb.text_frame; tf.word_wrap = True
+            tf.margin_top = tf.margin_bottom = 0
+            runs(tf.paragraphs[0], ("•  " if bullet else "") + text, size, color=color if color is not None else RGBColor(0x2B, 0x36, 0x48))
+            y = y + Inches(h + 0.08)
+    return y
+
+def panel(slide, left, top, width, title, items, size=15):
+    """shaded panel with a bold title and a stack() body; returns its bottom edge (EMU)"""
+    box = slide.shapes.add_shape(1, left, top, width, Inches(1))
     box.fill.solid(); box.fill.fore_color.rgb = RGBColor(0xEE, 0xF1, 0xF5); box.line.color.rgb = RGBColor(0xD9, 0xDE, 0xE6)
     box.shadow.inherit = False
-    tf = box.text_frame; tf.word_wrap = True; tf.vertical_anchor = MSO_ANCHOR.TOP
-    tf.margin_left = tf.margin_right = Inches(0.15); tf.margin_top = Inches(0.08)
-    p = tf.paragraphs[0]; runs(p, title, size - 1, bold=True, color=INK); p.space_after = Pt(6)
-    for ln in lines:
-        p = tf.add_paragraph(); runs(p, ln, size, color=RGBColor(0x2B, 0x36, 0x48)); p.space_after = Pt(4)
-    return box
+    tb = slide.shapes.add_textbox(left + Inches(0.05), top + Inches(0.06), width, Inches(0.35))
+    runs(tb.text_frame.paragraphs[0], title, size - 1, bold=True, color=INK)
+    bottom = stack(slide, left + Inches(0.05), top + Inches(0.5), width - Inches(0.1), items, size)
+    box.height = bottom - top + Inches(0.05)
+    return box.top + box.height
 
 def source(slide, left, top, width, text):
     tb = slide.shapes.add_textbox(left, top, width, Inches(0.4)); tb.text_frame.word_wrap = True
@@ -155,68 +196,64 @@ picture(s, "fig_timeline.png", Inches(1.4), Inches(4.8), Inches(10.5), Inches(1.
 # ───────────────────────────── 3 2012 baseline ─────────────────────────────
 s, a, b, geo = two_content("MH16.1-2012: effective area and the stub-column Q factor")
 remove(a); remove(b); (l, t, w, h) = geo[0]; (l2, t2, w2, h2) = geo[1]
-eqbox(s, l, t, w, Inches(3.3), "Compression (§4.1.3.1)", [
-    "Ae = [1 − (1 − Q)(Fn / Fy)^Q] · Anet,min",
-    "Pn = Ae Fn, with Fn from AISI S100 on the **gross, unperforated** section",
-    "Q = stub column strength / (Fy Anet,min) ≤ 1  (§9.2.2)"], 15)
-eqbox(s, l2, t2, w2, Inches(1.5), "Flexure (§4.1.2)", [
-    "Se = Snet,min (0.5 + Q/2)",
-    "Round corners for A and I; sharp corners permitted for J, Cw, ro"], 15)
-eqbox(s, l2, t2 + Inches(1.7), w2, Inches(1.6), "Distortional (§4.1.3.2)", [
-    "One sentence: certain open sections \"shall be checked … by testing or rational analysis\"",
-    "No equations, no elastic buckling load"], 15)
-textbox(s, l, t + Inches(3.6), Inches(11.5), Inches(0.5), [
-    "Frame stability by the effective length method: down-aisle Kx = 1.7 for unbraced racks, Kt = 0.8"], 14, color=MUTED, bullet=False)
+panel(s, l, t, w, "Compression (§4.1.3.1)", [
+    ("•", "Effective area from the stub-column test:"), ("eq", "ae"),
+    ("•", "P_{n} = A_{e} F_{n}, with F_{n} from AISI S100 on the **gross, unperforated** section"),
+    ("•", "Q = stub column strength / (F_{y} A_{net,min}) ≤ 1  (§9.2.2)")])
+y = panel(s, l2, t2, w2, "Flexure (§4.1.2)", [("eq", "se"),
+    ("•", "Round corners for A and I; sharp corners permitted for J, C_{w}, r_{o}")])
+panel(s, l2, y + Inches(0.2), w2, "Distortional (§4.1.3.2)", [
+    ("•", "One sentence: certain open sections \"shall be checked … by testing or rational analysis\""),
+    ("•", "No equations, no elastic buckling load")])
+textbox(s, l, Inches(6.1), Inches(11.5), Inches(0.5), [
+    "Frame stability by the effective length method: down-aisle K_{x} = 1.7 for unbraced racks, K_{t} = 0.8"], 14, color=MUTED, bullet=False)
 
 # ───────────────────────────── 4 strips ─────────────────────────────
 s, a, b, geo = two_content("MH16.1-2021 §8.2.1: perforations become reduced-thickness strips")
-bullets(a.text_frame, [
-    "Section properties use **round corners** for everything, including J and Cw (sharp corners are unconservative for torsion)",
-    "Each strip of web or flange that contains perforations is replaced by a solid strip of reduced thickness",
-    "**Global and local** buckling, kg = 0.6:   tg = kg t (Lnp / L)",
-    "**Distortional** buckling, kd = 0.8:   td = kd t (Lnp / L)^(1/3)",
-    "Lnp is the solid length between holes, L the pitch"], 16, 14)
-remove(b); (l2, t2, w2, h2) = geo[1]
+remove(a); remove(b); (l, t, w, h) = geo[0]; (l2, t2, w2, h2) = geo[1]
+stack(s, l, t, w, [
+    ("•", "Section properties use **round corners** for everything, including J and C_{w} (sharp corners are unconservative for torsion)"),
+    ("•", "Each strip of web or flange that contains perforations is replaced by a solid strip of reduced thickness"),
+    ("•", "**Global and local** buckling, k_{g} = 0.6:"), ("eq", "tg"),
+    ("•", "**Distortional** buckling, k_{d} = 0.8:"), ("eq", "td"),
+    ("•", "L_{np} is the solid length between holes, L the pitch")], 16)
 picture(s, "fig_strips.png", l2, t2, w2, Inches(2.6), "Source: ANSI MH16.1-2023, Figure 8.2-1, example of perforation strips in a column")
 textbox(s, l2, t2 + Inches(3.2), w2, Inches(1.2), [
-    "One idealized section feeds the frame model (§7.2.4), the global buckling check, and the finite strip model for Pcrd and Mcrd"], 15)
+    "One idealized section feeds the frame model (§7.2.4), the global buckling check, and the finite strip model for P_{crd} and M_{crd}"], 15)
 
 # ───────────────────────────── 5 compression ─────────────────────────────
 s, a, b, geo = two_content("MH16.1-2021/2023 §8.2.2: perforated compression members")
 remove(a); remove(b); (l, t, w, h) = geo[0]; (l2, t2, w2, h2) = geo[1]
-eqbox(s, l, t, w, Inches(1.95), "Global (8.2-3, 8.2-4)", [
-    "Pne = 0.658^(λc²) Py  for λc ≤ 1.5;   Pne = (0.877 / λc²) Py  for λc > 1.5",
-    "λc = √(Py / Pcre),  Py = Fy Anetg;  Pcre with K, L from §10.2, §10.3"], 15)
-eqbox(s, l, t + Inches(2.15), w, Inches(1.95), "Local + global (8.2-5, 8.2-6)", [
-    "Pnlg = Pne [1 − (1 − Q)(Pne / Py)^(Q/(1−Q))],  Q < 1",
-    "Pnlg = Pne if Q ≥ 1 (split out as its own equation in 2023)"], 15)
-eqbox(s, l2, t2, w2, Inches(1.95), "Distortional + global (8.2-7, 8.2-8)", [
-    "Pnld = [1 − 0.25 (Pcrd / Pne)^0.6] (Pcrd / Pne)^0.6 · Pne",
-    "for λd = √(Pne / Pcrd) > 0.561, else Pnld = Pne"], 15)
-textbox(s, l2, t2 + Inches(2.15), w2, Inches(2.0), [
-    "**Pn = min(Pnlg, Pnld)**",
-    "Pcrd: elastic distortional buckling \"in accordance with ANSI/AISI S100\" on the td section",
-    "Hot-rolled and closed sections: Pnlg only"], 15)
+y = panel(s, l, t - Inches(0.2), w, "Global (8.2-3, 8.2-4)", [("eq", "pne"),
+    "P_{y} = F_{y} A_{netg}; P_{cre} with K, L from §10.2, §10.3"])
+panel(s, l, y + Inches(0.2), w, "Local + global (8.2-5, 8.2-6)", [("eq", "pnlg"),
+    "P_{nlg} = P_{ne} if Q ≥ 1 (split out as its own equation in 2023)"])
+y = panel(s, l2, t2 - Inches(0.2), w2, "Distortional + global (8.2-7, 8.2-8)", [("eq", "pnld"),
+    "for λ_{d} = √(P_{ne} / P_{crd}) > 0.561, else P_{nld} = P_{ne}"])
+stack(s, l2, y + Inches(0.25), w2, [
+    ("•", "**P_{n} = min(P_{nlg}, P_{nld})**"),
+    ("•", "P_{crd}: elastic distortional buckling \"in accordance with ANSI/AISI S100\" on the t_{d} section"),
+    ("•", "Hot-rolled and closed sections: P_{nlg} only")], 16, color=INK)
 
 # ───────────────────────────── 6 local ─────────────────────────────
 s, a, b, geo = two_content("Local buckling: still the stub column, in a new form")
 remove(a); (l, t, w, h) = geo[0]
 picture(s, "fig_local_global.png", l, t, w, Inches(3.4),
-        "Both forms with Fn/Fy = Pne/Py on the same area basis. 2012 used Anet,min; 2021 uses Anetg from the strip section.")
+        "Both forms with F_{n}/F_{y} = P_{ne}/P_{y} on the same area basis. 2012 used A_{net,min}; 2021 uses A_{netg} from the strip section.")
 bullets(b.text_frame, [
-    "Local buckling is **not** a DSM check: there is no Pcrℓ. The perforation and local slenderness effects both come from the **stub-column test** (§13.2.3, Q = Ptest / (Fy Anetg) ≤ 1, interpolated between tmin and tmax)",
+    "Local buckling is **not** a DSM check: there is no P_{crℓ}. The perforation and local slenderness effects both come from the **stub-column test** (§13.2.3, Q = P_{test} / (F_{y} A_{netg}) ≤ 1, interpolated between t_{min} and t_{max})",
     "The 2021 exponent Q/(1 − Q) makes the local penalty fade as the column becomes globally slender, the same trend as the DSM local–global curve",
-    "For a given Q, the new form is less severe at intermediate λc"], 16, 14)
+    "For a given Q, the new form is less severe at intermediate λ_{c}"], 16, 14)
 
 # ───────────────────────────── 7 distortional ─────────────────────────────
 s, a, b, geo = two_content("Distortional buckling: the Direct Strength Method piece")
 bullets(a.text_frame, [
-    "New in 2021: an explicit distortional check with an elastic buckling load, Pcrd or Mcrd, the DSM ingredient",
-    "Same 0.25 / 0.6 coefficients and 0.561 limit as the AISI S100 distortional curve, but **anchored at Pne instead of Py**",
+    "New in 2021: an explicit distortional check with an elastic buckling load, P_{crd} or M_{crd}, the DSM ingredient",
+    "Same 0.25 / 0.6 coefficients and 0.561 limit as the AISI S100 distortional curve, but **anchored at P_{ne} instead of P_{y}**",
     "That captures distortional–global interaction, which tests and FE studies on perforated uprights showed (Casafont, Pastor, Roure, Bonada, Peköz)",
-    "At λc = 0 the two agree; at intermediate slenderness MH16.1 is lower, and both reach Pne for slender columns"], 16, 14)
+    "At λ_{c} = 0 the two agree; at intermediate slenderness MH16.1 is lower, and both reach P_{ne} for slender columns"], 16, 14)
 remove(b); (l2, t2, w2, h2) = geo[1]
-picture(s, "fig_dist_curve.png", l2, t2, w2, Inches(3.4), "Example with Pcrd = 0.6 Py")
+picture(s, "fig_dist_curve.png", l2, t2, w2, Inches(3.4), "Example with P_{crd} = 0.6 P_{y}")
 
 # ───────────────────────────── 8 FSM ─────────────────────────────
 s, a, b, geo = two_content("Finite strip analysis on the strip section")
@@ -226,37 +263,35 @@ picture(s, "fig_cufsm.png", l, t, w, Inches(2.6),
 bullets(b.text_frame, [
     "Commentary C8: the \"most suitable design approach would be to use finite strip analysis combined with the expressions given\"",
     "Workflow",
-    ("build the round-corner section with td in the perforated strips", 1),
+    ("build the round-corner section with t_{d} in the perforated strips", 1),
     ("run CUFSM (or any S100 Appendix 2 analysis)", 1),
-    ("read Pcrd at the distortional minimum", 1),
-    ("the same model with tg gives the global section properties", 1),
+    ("read P_{crd} at the distortional minimum", 1),
+    ("the same model with t_{g} gives the global section properties", 1),
     "Basis: tests, shell FE and FSM studies on perforated uprights (Casafont et al., ASCE J. Struct. Eng. 2013, \"Design of steel storage rack columns via the Direct Strength Method\")"], 16, 14)
 
 # ───────────────────────────── 9 flexure ─────────────────────────────
 s, a, b, geo = two_content("MH16.1-2021/2023 §8.2.3: flexure follows the same pattern")
 remove(a); remove(b); (l, t, w, h) = geo[0]; (l2, t2, w2, h2) = geo[1]
-eqbox(s, l, t, w, Inches(1.9), "Local + global (8.2-9, 8.2-10)", [
-    "Mnlg = Mne [1 − ½ (1 − Q)(Mne / My)^(Q/(1−Q))],  Q < 1",
-    "My = Fy Sfy, with Sfy on the reduced-thickness section"], 15)
-eqbox(s, l2, t2, w2, Inches(1.9), "Distortional + global (8.2-11, 8.2-12)", [
-    "Mnld = [1 − 0.22 (Mcrd / Mne)^0.5] (Mcrd / Mne)^0.5 · Mne",
-    "for λd = √(Mne / Mcrd) > 0.673, else Mnld = Mne"], 15)
-textbox(s, l, t + Inches(2.2), Inches(11.5), Inches(2.0), [
-    "Mn = min(Mnlg, Mnld) for open cold-formed sections bending about the axis of symmetry; hot-rolled and closed sections use Mnlg",
-    "The coefficients match the AISI S100 flexural distortional curve, anchored at Mne like compression",
-    "Mcrd comes from finite strip analysis on the td section, as for Pcrd"], 16)
+y1 = panel(s, l, t, w, "Local + global (8.2-9, 8.2-10)", [("eq", "mnlg"),
+    "M_{y} = F_{y} S_{fy}, with S_{fy} on the reduced-thickness section"])
+y2 = panel(s, l2, t2, w2, "Distortional + global (8.2-11, 8.2-12)", [("eq", "mnld"),
+    "for λ_{d} = √(M_{ne} / M_{crd}) > 0.673, else M_{nld} = M_{ne}"])
+stack(s, l, max(y1, y2) + Inches(0.3), Inches(11.5), [
+    ("•", "M_{n} = min(M_{nlg}, M_{nld}) for open cold-formed sections bending about the axis of symmetry; hot-rolled and closed sections use M_{nlg}"),
+    ("•", "The coefficients match the AISI S100 flexural distortional curve, anchored at M_{ne} like compression"),
+    ("•", "M_{crd} comes from finite strip analysis on the t_{d} section, as for P_{crd}")], 16, color=INK)
 
 # ───────────────────────────── 10 stability ─────────────────────────────
 s, a, b, geo = two_content("MH16.1-2021: from effective length to direct analysis")
 bullets(a.text_frame, [
     "**§7.2: second-order analysis with notional loads** replaces the effective length method",
-    ("Ni = 0.004 αYi with the stiffness reduction τb, or 0.005 αYi without; minimum 0.002 αYi", 1),
-    ("B2 = 1 / (1 − α PΔ / (Rm H L))", 1),
+    ("N_{i} = 0.004 αY_{i} with the stiffness reduction τ_{b}, or 0.005 αY_{i} without; minimum 0.002 αY_{i}", 1),
+    ("B_{2} = 1 / (1 − α P_{Δ} / (R_{m} H L))", 1),
     ("semi-rigid beam-to-column connections modeled with springs", 1),
-    "Down-aisle Kx = 1.0 (§10.2.1)",
+    "Down-aisle K_{x} = 1.0 (§10.2.1)",
     "Member and frame models use the same hole-reduced section properties"], 16, 14)
 bullets(b.text_frame, [
-    "**Connectors from cyclic tests** (§13.5): design moment 0.75 Mmax; stiffness is the secant at 0.8 Mconn,d",
+    "**Connectors from cyclic tests** (§13.5): design moment 0.75 M_{max}; stiffness is the secant at 0.8 M_{conn,d}",
     "New tests: base fixity (§13.6) and frame bracing (§13.7); portal and upright frame tests removed",
     "Seismic aligned to ASCE 7-16; redundancy factor for multiple rows; overstrength design of base plates and anchors (§11.3)",
     "ISO-style reorganization of the whole document"], 16, 14)
